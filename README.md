@@ -26,14 +26,17 @@ through a office server(office.example.com) with securing key 'mysecret',
 then following steps figure out how to:
 
 1 On server office.example.com:
+
 tcpredirect -k :mysecret office.example.com:8080:www.example.com:8080
 
 2 On server www.example.com:
+
 tcpredirect -k mysecret: www.example.com:8080:www.example.com:80
 
 3 Setup browser using proxy server office.example.com:8080
 
 Traffic flow:
+
 Browser <=> Office(office.example.com:8080) <= ..Secured.. =>
 	Site(www.example.com:8080) <=> Proxy(www.example.com:80)
 
