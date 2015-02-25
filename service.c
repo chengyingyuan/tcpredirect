@@ -157,212 +157,189 @@ void service_destroy(service_t *s)
 	free(s);
 }
 
+static void service_close_socket(service_t *s, sock_t *sock)
+{
+	if (*sock != NETSOCK_INVALID) {
+		fdevent_unregister(s->ev, *sock);
+		net_close(*sock);
+		*sock = NETSOCK_INVALID;
+	} else {
+		//logmsg("WARN: Socket already closed\n");
+	}
+}
 static void service_cleanup_client(service_t *s, client_t *c)
 {
-	if (c->lsock != NETSOCK_INVALID) {
-		fdevent_unregister(s->ev, c->lsock);
+	service_close_socket(s, &c->left->sock);
+	service_close_socket(s, &c->right->sock);
+	logmsg("Cleaned up client(%s,%s)\n", 
+		c->left->desc, c->right->desc);
+	clients_remove(s->pc, c); // Destroy completely
+}
+static void service_fixup_status(service_t *s, client_t *c, partner_t* curr)
+{
+	partner_t *other = (c->left==curr) ? c->right:c->left;
+
+	if (curr->status == CLIENT_READ_CLOSED) {
+		if (!(other->status & (CLIENT_WRITE_CLOSED|CLIENT_CLOSED))) {
+			if (!LOADSIZE(curr->buf)) { // No more bytes to write
+				if (other->status==CLIENT_READ_CLOSED) {
+					service_close_socket(s, &other->sock);
+					other->status = CLIENT_CLOSED;
+				} else {
+					net_close_half(other->sock, 0); // close write
+					fdevent_clear(s->ev, other->sock, FDEVENT_WRITE);
+					other->status = CLIENT_WRITE_CLOSED;
+				}
+			}
+		}
 	}
-	if (c->rsock != NETSOCK_INVALID) {
-		fdevent_unregister(s->ev, c->rsock);
+	else if (curr->status == CLIENT_WRITE_CLOSED) {
+		if (!(other->status & (CLIENT_READ_CLOSED|CLIENT_CLOSED))) {
+			logmsg("ERROR Writing illogical\n");
+			abort();
+		}
 	}
-	logmsg("Cleaned up client(%s,%s)\n", c->ldesc, c->rdesc);
-	clients_remove(s->pc, c);
-	//client_destroy(c); //rb tree already freed it
+	else if (curr->status == CLIENT_CLOSED) {
+		if (!(other->status & CLIENT_CLOSED)) {
+			if (!LOADSIZE(curr->buf)) { // No more bytes to write
+				service_close_socket(s, &other->sock);
+				other->status = CLIENT_CLOSED;
+			} else {
+				logmsg("DEBUG Remains to send before close\n");
+			}
+		}
+	}
 }
 
 static int service_test_complete(service_t *s, client_t *c)
 {
-	if (c->lstatus==CLIENT_READ_CLOSED && 
-		c->rstatus==CLIENT_READ_CLOSED &&
-		!(LOADSIZE(c->lbuf)) &&
-		!(LOADSIZE(c->rbuf))) {
-		logmsg("Client(%s,%s) completed, clean up...\n", c->ldesc, c->rdesc);
+	partner_t *left, *right;
+	left = c->left;
+	right = c->right;
+
+	service_fixup_status(s, c, left);
+	service_fixup_status(s, c, right);
+
+	/*logmsg("Client(%s => %d,%s => %d)\n", left->desc, left->status,
+		right->desc, right->status);*/
+	if (left->status==CLIENT_CLOSED && right->status==CLIENT_CLOSED) {
+		logmsg("Client(%s,%s) completed, clean up...\n", 
+			left->desc, right->desc);
 		service_cleanup_client(s, c);
 		return 1;
 	}
 	return 0;
 }
 
-static int service_handle_read_left(service_t *s, client_t *c)
+static int service_handle_client_read(service_t *s, client_t *c, partner_t* curr)
 {
-	switch(c->lstatus) {
+	partner_t *other = (c->left == curr) ? c->right:c->left;
+
+	switch(curr->status) {
 	case CLIENT_READY:
-		if (FREESIZE(c->lbuf)) {
-			int avail = FREESIZE(c->lbuf);
-			int nbytes = net_recv(c->lsock, FREEPTR(c->lbuf), avail, 0);
+	case CLIENT_WRITE_CLOSED:
+		if (FREESIZE(curr->buf)) {
+			int avail = FREESIZE(curr->buf);
+			int nbytes = net_recv(curr->sock, FREEPTR(curr->buf), avail, 0);
 			if (nbytes == -1) {
-				logmsg("Error read client(%s,%s) left socket\n", c->ldesc, c->rdesc);
+				/* Close both sides right now */
+				logmsg("Error read client(%s,%s) left socket\n", 
+					curr->desc, curr->desc);
 				service_cleanup_client(s, c);
 
 			} else {
-				if (nbytes == 0) {
-					c->lstatus = CLIENT_READ_CLOSED;
-					fdevent_clear(s->ev, c->lsock, FDEVENT_READ);
-					//logmsg("Client(%s,%s) left end of read\n", c->ldesc, c->rdesc);
+				curr->last = time(NULL);
+				if (nbytes == 0) { // no bytes read
+					curr->status = (curr->status==CLIENT_READY) ? 
+						CLIENT_READ_CLOSED:CLIENT_CLOSED;
+					fdevent_clear(s->ev, curr->sock, FDEVENT_READ);
+					//logmsg("Client(%s,%s) end of read\n", curr->desc, other->desc);
 					service_test_complete(s, c);
 
 				} else {
-					if (c->lrc4_in) {
-						rc4_cipher(c->lrc4_in, (uint8_t *)(FREEPTR(c->lbuf)), nbytes);
+					if (curr->rc4_in) {
+						rc4_cipher(curr->rc4_in, (uint8_t *)(FREEPTR(curr->buf)), nbytes);
 					}
-					if (c->rrc4_out) {
-						rc4_cipher(c->rrc4_out, (uint8_t *)(FREEPTR(c->lbuf)), nbytes);
+					if (other->rc4_out) {
+						rc4_cipher(other->rc4_out, (uint8_t *)(FREEPTR(curr->buf)), nbytes);
 					}
-					FREESTEP(c->lbuf, nbytes);
-					//logmsg("Client(%s,%s) left read %d bytes\n", c->ldesc, c->rdesc, nbytes);
-					if (c->rstatus==CLIENT_READY || c->rstatus==CLIENT_READ_CLOSED) {
-						fdevent_set(s->ev, c->rsock, FDEVENT_WRITE);
+					FREESTEP(curr->buf, nbytes);
+					//logmsg("Client(%s,%s) read %d bytes\n", curr->desc, other->desc, nbytes);
+					if (other->status & (CLIENT_READY|CLIENT_READ_CLOSED)) {
+						fdevent_set(s->ev, other->sock, FDEVENT_WRITE);
 					}
-					if (!FREESIZE(c->lbuf)) {
-						fdevent_clear(s->ev, c->lsock, FDEVENT_READ);
+					if (!FREESIZE(curr->buf)) {
+						fdevent_clear(s->ev, curr->sock, FDEVENT_READ);
 					}
 				}
 			}
 		} else {
-			logmsg("Warning Client(%s,%s) left read without space\n", 
-				c->ldesc, c->rdesc);
-			fdevent_clear(s->ev, c->lsock, FDEVENT_READ);		
+			logmsg("Warning Client(%s,%s) read without space\n", 
+				curr->desc, other->desc);
+			fdevent_clear(s->ev, curr->sock, FDEVENT_READ);		
 		}
 		break;
 	case CLIENT_CONNECTING:
 	case CLIENT_READ_CLOSED:
 	case CLIENT_CLOSED:
 	default:
+		logmsg("ERROR Client(%s,%s) read with status %d\n", 
+			curr->desc, other->desc, curr->status);
 		assert(0);
 	}
 	return 0;
 }
 
-static int service_handle_read_right(service_t *s, client_t *c)
+static int service_handle_client_write(service_t *s, client_t *c, partner_t *curr)
 {
-	switch(c->rstatus) {
+	partner_t *other = (c->left == curr) ? c->right:c->left;
+
+	switch(curr->status) {
 	case CLIENT_READY:
-		if (FREESIZE(c->rbuf)) {
-			int avail = FREESIZE(c->rbuf);
-			int nbytes = net_recv(c->rsock, FREEPTR(c->rbuf), avail, 0);
+	case CLIENT_READ_CLOSED:
+		if (LOADSIZE(other->buf)) {
+			int avail = LOADSIZE(other->buf);
+			int nbytes = net_send(curr->sock, LOADPTR(other->buf), avail, 0);
 			if (nbytes == -1) {
-				logmsg("Error read client(%s,%s) right socket\n", c->ldesc, c->rdesc);
+				logmsg("Error write client(%s,%s) left socket\n", 
+					curr->desc, other->desc);
 				service_cleanup_client(s, c);
 
 			} else {
-				if (nbytes == 0) {
-					c->rstatus = CLIENT_READ_CLOSED;
-					fdevent_clear(s->ev, c->rsock, FDEVENT_READ);
-					//logmsg("Client(%s,%s) right end of read\n", c->ldesc, c->rdesc);
-					service_test_complete(s, c);
-
-				} else {
-					if (c->rrc4_in) {
-						rc4_cipher(c->rrc4_in, (uint8_t *)(FREEPTR(c->rbuf)), nbytes);
-					}
-					if (c->lrc4_out) {
-						rc4_cipher(c->lrc4_out, (uint8_t *)(FREEPTR(c->rbuf)), nbytes);
-					}
-					FREESTEP(c->rbuf, nbytes);
-					//logmsg("Client(%s,%s) right read %d bytes\n", c->ldesc, c->rdesc, nbytes);
-					if (c->lstatus==CLIENT_READY || c->lstatus==CLIENT_READ_CLOSED) {
-						fdevent_set(s->ev, c->lsock, FDEVENT_WRITE);
-					}
-					if (!FREESIZE(c->rbuf)) {
-						fdevent_clear(s->ev, c->rsock, FDEVENT_READ);
-					}
-				}
-			}
-		} else {
-			logmsg("Warning Client(%s,%s) right read without space\n", c->ldesc, c->rdesc);
-			fdevent_clear(s->ev, c->rsock, FDEVENT_READ);		
-		}
-		break;
-	case CLIENT_CONNECTING:
-	case CLIENT_READ_CLOSED:
-	case CLIENT_CLOSED:
-	default:
-		assert(0);
-	}
-	return 0;
-}
-
-static int service_handle_write_left(service_t *s, client_t *c)
-{
-	switch(c->lstatus) {
-	case CLIENT_READY:
-	case CLIENT_READ_CLOSED:
-		if (LOADSIZE(c->rbuf)) {
-			int avail = LOADSIZE(c->rbuf);
-			int nbytes = net_send(c->lsock, LOADPTR(c->rbuf), avail, 0);
-			if (nbytes == -1) {
-				logmsg("Error write client(%s,%s) left socket\n", c->ldesc, c->rdesc);
-				service_cleanup_client(s, c);
-
-			} else {
-				if (nbytes > 0) {
-					LOADSTEP(c->rbuf, nbytes);
-					//logmsg("Client(%s,%s) left write %d bytes\n", c->ldesc, c->rdesc, nbytes);
+				if (nbytes > 0) { // wrote some bytes
+					curr->last = time(NULL);
+					LOADSTEP(other->buf, nbytes);
+					//logmsg("Client(%s,%s) write %d bytes\n", curr->desc, other->desc, nbytes);
 					if (!service_test_complete(s, c)) {
-						if (c->rstatus == CLIENT_READY) {
-							fdevent_set(s->ev, c->rsock, FDEVENT_READ);
+						if (other->status & (CLIENT_READY|CLIENT_WRITE_CLOSED)) {
+							fdevent_set(s->ev, other->sock, FDEVENT_READ);
 						}
-						if (!LOADSIZE(c->rbuf)) {
-							fdevent_clear(s->ev, c->lsock, FDEVENT_WRITE);
-						}					
-					}
-				}
-			}		
-		} else {
-			logmsg("Warning Client(%s,%s) left write without load\n", c->ldesc, c->rdesc);
-			fdevent_clear(s->ev, c->lsock, FDEVENT_WRITE);		
-		}
-		break;
-	case CLIENT_CONNECTING:
-	case CLIENT_CLOSED:
-	default:
-		assert(0);
-	}
-	return 0;
-}
-
-static int service_handle_write_right(service_t *s, client_t *c)
-{
-	switch(c->rstatus) {
-	case CLIENT_CONNECTING:
-		c->rstatus = CLIENT_READY;
-		fdevent_set(s->ev, c->rsock, FDEVENT_READ);
-		//logmsg("Client(%s,%s) right ready\n", c->ldesc, c->rdesc);
-		if (!LOADSIZE(c->lbuf)) {
-			fdevent_clear(s->ev, c->rsock, FDEVENT_WRITE);
-		}
-		break;
-	case CLIENT_READY:
-	case CLIENT_READ_CLOSED:
-		if (LOADSIZE(c->lbuf)) {
-			int avail = LOADSIZE(c->lbuf);
-			int nbytes = net_send(c->rsock, LOADPTR(c->lbuf), avail, 0);
-			if (nbytes == -1) {
-				logmsg("Error write client(%s=>%s) right socket\n", c->ldesc, c->rdesc);
-				service_cleanup_client(s, c);
-
-			} else {
-				if (nbytes > 0) {
-					LOADSTEP(c->lbuf, nbytes);
-					//logmsg("Client(%s,%s) right write %d bytes\n", c->ldesc, c->rdesc, nbytes);
-					if (!service_test_complete(s, c)) {
-						if (c->lstatus == CLIENT_READY) {
-							fdevent_set(s->ev, c->lsock, FDEVENT_READ);
+						if (!LOADSIZE(other->buf)) {
+							fdevent_clear(s->ev, curr->sock, FDEVENT_WRITE);
 						}
-						if (!LOADSIZE(c->lbuf)) {
-							fdevent_clear(s->ev, c->rsock, FDEVENT_WRITE);
-						}	
 					}
 				}
 			}
-		} else {
-			logmsg("Warning Client(%s,%s) right write without load\n", 
-				c->ldesc, c->rdesc);
-			fdevent_clear(s->ev, c->rsock, FDEVENT_WRITE);
+		} else { // no bytes to write
+			logmsg("Warning Client(%s,%s) write without load\n", 
+				curr->desc, other->desc);
+			fdevent_clear(s->ev, curr->sock, FDEVENT_WRITE);		
 		}
 		break;
+	case CLIENT_CONNECTING:
+                curr->status = CLIENT_READY;
+		curr->last = time(NULL);
+                fdevent_set(s->ev, curr->sock, FDEVENT_READ);
+                //logmsg("Client(%s,%s) ready\n", curr->desc, other->desc);
+                if (!LOADSIZE(other->buf)) {
+                        fdevent_clear(s->ev, curr->sock, FDEVENT_WRITE);
+                }
+                break;
+	case CLIENT_WRITE_CLOSED:
 	case CLIENT_CLOSED:
 	default:
+		logmsg("ERROR Client(%s,%s) write with status %d\n", 
+			curr->desc, other->desc, curr->status);
 		assert(0);
 	}
 	return 0;
@@ -380,46 +357,51 @@ static int service_accept_client(service_t *s)
 		logmsg("ERROR Accept client socket\n");
 		return -1;
 	}
+	if (client == NETSOCK_INVALID) {
+		return 0; // Try again
+	}
 	p = client_init(s->conf->leftbuffer, s->conf->rightbuffer);
-	p->lsock = client;
+	p->left->sock = client;
 	if (net_socket_block(client, 0) != 0) {
 		logmsg("ERROR Cannot set accepted socket block\n");
 		client_destroy(p);
 		return -1;
 	}
-	if (net_create_client(s->conf->rightaddr, s->conf->rightport, &p->rsock)!=0) {
-		logmsg("ERROR Cannot create peer endpoint for client '%s'\n", p->ldesc);
+	if (net_create_client(s->conf->rightaddr, s->conf->rightport, &p->right->sock)!=0) {
+		logmsg("ERROR Cannot create right side for client '%s'\n", p->left->desc);
 		client_destroy(p);
 		return -1;
 
 	} else {
-		p->llast = time(NULL);
-		p->lstatus = CLIENT_READY;
+		p->left->last = time(NULL);
+		p->left->status = CLIENT_READY;
 		paddr = (struct sockaddr_in *)&addr;
 		sprintf(desc, "%s:%d", inet_ntoa(paddr->sin_addr), (int)ntohs(paddr->sin_port));
-		p->ldesc = strdup(desc);
+		p->left->desc = strdup(desc);
 		if (s->conf->leftkey) {
-			p->lrc4_in = rc4_init((uint8_t*)(s->conf->leftkey), strlen(s->conf->leftkey));
-			p->lrc4_out = rc4_init((uint8_t*)(s->conf->leftkey), strlen(s->conf->leftkey));
+			p->left->rc4_in = rc4_init((uint8_t*)(s->conf->leftkey), strlen(s->conf->leftkey));
+			p->left->rc4_out = rc4_init((uint8_t*)(s->conf->leftkey), strlen(s->conf->leftkey));
 		}
 
-		p->rlast = time(NULL);
-		p->rstatus = CLIENT_CONNECTING;
+		p->right->last = time(NULL);
+		p->right->status = CLIENT_CONNECTING;
 		sprintf(desc, "%s:%d", s->conf->rightaddr, s->conf->rightport);
-		p->rdesc = strdup(desc);
+		p->right->desc = strdup(desc);
 		if (s->conf->rightkey) {
-			p->rrc4_in = rc4_init((uint8_t*)(s->conf->rightkey), strlen(s->conf->rightkey));
-			p->rrc4_out = rc4_init((uint8_t*)(s->conf->rightkey), strlen(s->conf->rightkey));		
+			p->right->rc4_in = rc4_init((uint8_t*)(s->conf->rightkey), strlen(s->conf->rightkey));
+			p->right->rc4_out = rc4_init((uint8_t*)(s->conf->rightkey), strlen(s->conf->rightkey));		
 		}
 
-		fdevent_register(s->ev, p->lsock, p);
-		fdevent_register(s->ev, p->rsock, p);
-		fdevent_set(s->ev, p->lsock, FDEVENT_READ);
-		fdevent_set(s->ev, p->rsock, FDEVENT_WRITE);
+		fdevent_register(s->ev, p->left->sock, p);
+		fdevent_register(s->ev, p->right->sock, p);
+		fdevent_set(s->ev, p->left->sock, FDEVENT_READ);
+		fdevent_set(s->ev, p->right->sock, FDEVENT_WRITE);
 	}
 
 	clients_insert(s->pc, p);
-	logmsg("Accepted client: %s(%d) => %s(%d)\n", p->ldesc, p->lsock, p->rdesc, p->rsock);
+	logmsg("Accepted client: %s(%d) => %s(%d)\n", 
+		p->left->desc, p->left->sock, 
+		p->right->desc, p->right->sock);
 	return 0;
 }
 
@@ -442,8 +424,8 @@ void service_handle_timeout(void *srv)
 		nnodes = 0;
 		while (node != s->pc->c->nil) {
 			c = (client_t *)node->info;
-			if (now-c->llast >= s->conf->lefttimeout || 
-				now-c->rlast >= s->conf->righttimeout) {
+			if ((now - c->left->last) >= s->conf->lefttimeout ||
+				(now - c->right->last) >= s->conf->righttimeout) {
 				nodes[nnodes++] = node;
 				if (nnodes >= NODESSIZE)
 					break;
@@ -474,11 +456,11 @@ void service_handle_read(void *srv, void *ctx, sock_t f)
 		}
 		return;
 	}
-	assert((f==c->lsock || f==c->rsock));
-	if (f == c->lsock) {
-		service_handle_read_left(s, c);
+	assert((f==c->left->sock || f==c->right->sock));
+	if (f == c->left->sock) {
+		service_handle_client_read(s, c, c->left);
 	} else {
-		service_handle_read_right(s, c);
+		service_handle_client_read(s, c, c->right);
 	}
 }
 
@@ -486,11 +468,11 @@ void service_handle_write(void *srv, void *ctx, sock_t f)
 {
 	service_t *s = (service_t *)srv;
 	client_t *c = (client_t *)ctx;
-	assert((f==c->lsock || f==c->rsock));
-	if (f == c->lsock) {
-		service_handle_write_left(s, c);
+	assert((f==c->left->sock || f==c->right->sock));
+	if (f == c->left->sock) {
+		service_handle_client_write(s, c, c->left);
 	} else {
-		service_handle_write_right(s, c);
+		service_handle_client_write(s, c, c->right);
 	}
 }
 
@@ -505,8 +487,8 @@ void service_handle_except(void *srv, void *ctx, sock_t f)
 		fdevent_stop(s->ev);
 		return;
 	}
-	isleft = (f == c->lsock);
-	logmsg("Client(%s=>%s) %s except happened, cleanup...\n", 
-		c->ldesc, c->rdesc, isleft?"left":"right");
+	isleft = (f == c->left->sock);
+	logmsg("Client(%s=>%s)%s except happened, cleanup...\n", 
+		c->left->desc, c->right->desc, isleft?"left":"right");
 	service_cleanup_client(s, c);
 }

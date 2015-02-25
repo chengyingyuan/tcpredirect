@@ -2,6 +2,7 @@
 #include "rbtree.h"
 #include "slink.h"
 #include "logmsg.h"
+#include "compiler.h"
 #include <assert.h>
 #include <stdlib.h>
 
@@ -43,6 +44,7 @@ static int rb_fd_cmp(const void *a, const void*b)
 
 static void rb_fd_free(void *p)
 {
+	UNUSED(p);
 }
 
 fdevent_t* fdevent_init(void *srv, struct timeval *tv, 
@@ -134,6 +136,7 @@ void fdevent_clear(fdevent_t *ev, sock_t s, int type)
 	node = RBExactQuery(ev->fds, &s);
 	assert(node != NULL);
 	fd = (fdevent_fd_t *)node->info;
+	assert(!IS_INVALID_FD(fd));
 	fd->ev = fd->ev & (~type);
 	//logmsg("Fd %d clear to %d(sub %d)\n", s, fd->ev, type);
 }
@@ -211,13 +214,19 @@ int fdevent_poll(fdevent_t *ev)
 				node = RBEnumerateNext(it);
 				continue;
 			}
-			if (!IS_INVALID_FD(fd) && (type & FDEVENT_READ) && FD_ISSET(fd->s, &rdset)) {
+			if (!IS_INVALID_FD(fd) && 
+				(type & FDEVENT_READ) && 
+				FD_ISSET(fd->s, &rdset)) {
 				ev->cbread(ev->srv, fd->ctx, fd->s);
 			}
-			if (!IS_INVALID_FD(fd) && (type & FDEVENT_WRITE) && FD_ISSET(fd->s, &wrset)) {
+			if (!IS_INVALID_FD(fd) && 
+				(type & FDEVENT_WRITE) && 
+				FD_ISSET(fd->s, &wrset)) {
 				ev->cbwrite(ev->srv, fd->ctx, fd->s);
 			}
-			if (!IS_INVALID_FD(fd) && (type & FDEVENT_EXCEPT) && FD_ISSET(fd->s, &exset)) {
+			if (!IS_INVALID_FD(fd) && 
+				(type & FDEVENT_EXCEPT) && 
+				FD_ISSET(fd->s, &exset)) {
 				ev->cbexcept(ev->srv, fd->ctx, fd->s);
 			}
 			node = RBEnumerateNext(it);

@@ -1,6 +1,7 @@
 #ifndef CLIENT_H
 #define CLIENT_H
 
+#include <time.h>
 #include "rwbuffer.h"
 #include "network.h"
 #include "rbtree.h"
@@ -10,27 +11,27 @@
 #define CLIENT_CONNECTING	1
 #define CLIENT_READY 2
 #define CLIENT_READ_CLOSED 4
-#define CLIENT_CLOSED 8
+#define CLIENT_WRITE_CLOSED 8
+#define CLIENT_CLOSED 16
 
 // A structure to splice left and right socket
+typedef struct partner 
+{
+	sock_t sock;
+	rwbuffer_t *buf;
+	int status; // left socket status
+	time_t last;	// left side of last time reading/writing
+	char *desc; // left description addr:port
+	rc4_t *rc4_in;
+	rc4_t *rc4_out;
+
+} partner_t;
+
 typedef struct client 
 {
 	struct client *self; // key for red-black-tree
-	sock_t lsock;
-	rwbuffer_t *lbuf;
-	int lstatus; // left socket status
-	int llast;	// left side of last time reading/writing
-	char *ldesc; // left description addr:port
-	rc4_t *lrc4_in;
-	rc4_t *lrc4_out;
-
-	sock_t rsock;
-	rwbuffer_t *rbuf;
-	int rstatus; // right socket status
-	int rlast; // right side of last time reading/writing
-	char *rdesc; // right description addr:port
-	rc4_t *rrc4_in;
-	rc4_t *rrc4_out;
+	partner_t* left;
+	partner_t* right;
 
 } client_t;
 

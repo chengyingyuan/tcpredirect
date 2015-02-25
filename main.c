@@ -5,6 +5,7 @@
 #include "network.h"
 #include "logmsg.h"
 #include "service.h"
+#include "compiler.h"
 
 #define USAGE "USAGE: tcpredirect [-k [<left-key>]:[<right-key>]] \n" \
 	"\t[-b [left-buffer-size]:[right-buffer-size]]\n" \
@@ -63,6 +64,7 @@ static void cleanup()
 
 static void sig_handler(int signo)
 {
+	UNUSED(signo);
 	if (s) {
 		fdevent_stop(s->ev);
 	}
@@ -70,8 +72,11 @@ static void sig_handler(int signo)
 
 static void setup(int argc, const char *argv[])
 {
+	UNUSED(argc);
+	UNUSED(argv);
 	if (signal(SIGTERM, sig_handler)==SIG_ERR || 
-		signal(SIGINT, sig_handler)==SIG_ERR) {
+		signal(SIGINT, sig_handler)==SIG_ERR ||
+		signal(SIGPIPE, SIG_IGN)) {
 		die("ERROR Set signal handler\n");
 	}
 }

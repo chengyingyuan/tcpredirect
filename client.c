@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <assert.h>
+#include "compiler.h"
 #include "client.h"
 
 client_t* client_init(int lbuflen, int rbuflen)
@@ -7,30 +8,36 @@ client_t* client_init(int lbuflen, int rbuflen)
 		client_t *p = (client_t *)calloc(1, sizeof(client_t));
 		assert(p);
 		p->self = p;
-		p->lbuf = rwbuffer_init(lbuflen);
-		p->rbuf = rwbuffer_init(rbuflen);
-		p->lsock = NETSOCK_INVALID;
-		p->rsock = NETSOCK_INVALID;
-		p->lstatus = CLIENT_UNSET;
-		p->rstatus = CLIENT_UNSET;
-		p->llast = 0;
-		p->rlast = 0;
+		p->left = (partner_t *)calloc(1, sizeof(partner_t));
+		p->right = (partner_t *)calloc(1,sizeof(partner_t));
+		assert(p->left);
+		assert(p->right);
+		p->left->buf = rwbuffer_init(lbuflen);
+		p->right->buf = rwbuffer_init(rbuflen);
+		p->left->sock = NETSOCK_INVALID;
+		p->right->sock = NETSOCK_INVALID;
+		p->left->status = CLIENT_UNSET;
+		p->right->status = CLIENT_UNSET;
+		p->left->last = 0;
+		p->right->last = 0;
 		return p;
 }
 
 void client_destroy(void *p)
 {
 	client_t *c = (client_t *)p;
-	if (c->lbuf) rwbuffer_destroy(c->lbuf);
-	if (c->ldesc) free(c->ldesc);
-	if (c->rbuf) rwbuffer_destroy(c->rbuf);
-	if (c->rdesc) free(c->rdesc);
-	if (c->lrc4_in) rc4_destroy(c->lrc4_in);
-	if (c->lrc4_out) rc4_destroy(c->lrc4_out);
-	if (c->rrc4_in) rc4_destroy(c->rrc4_in);
-	if (c->rrc4_out) rc4_destroy(c->rrc4_out);
-	if (c->lsock != NETSOCK_INVALID) net_close(c->lsock);
-	if (c->rsock != NETSOCK_INVALID) net_close(c->rsock);
+	if (c->left->buf) rwbuffer_destroy(c->left->buf);
+	if (c->left->desc) free(c->left->desc);
+	if (c->right->buf) rwbuffer_destroy(c->right->buf);
+	if (c->right->desc) free(c->right->desc);
+	if (c->left->rc4_in) rc4_destroy(c->left->rc4_in);
+	if (c->left->rc4_out) rc4_destroy(c->left->rc4_out);
+	if (c->right->rc4_in) rc4_destroy(c->right->rc4_in);
+	if (c->right->rc4_out) rc4_destroy(c->right->rc4_out);
+	if (c->left->sock != NETSOCK_INVALID) net_close(c->left->sock);
+	if (c->right->sock != NETSOCK_INVALID) net_close(c->right->sock);
+	free(c->left);
+	free(c->right);
 	free(c);
 }
 
@@ -45,9 +52,10 @@ static int rb_client_cmp(const void *a, const void *b)
 
 static void rb_client_free_key(void *p)
 {
+	UNUSED(p);
 }
 
-clients_t* clients_init(int size)
+clients_t* clients_init()
 {
 	clients_t *p = (clients_t *)calloc(1, sizeof(clients_t));
 	assert(p);

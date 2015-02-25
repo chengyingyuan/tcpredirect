@@ -1,4 +1,5 @@
 #include "slink.h"
+#include "compiler.h"
 #include <stdlib.h>
 #include <assert.h>
 
@@ -79,6 +80,7 @@ int slink_length(slink_t *s)
 void slink_enqueue(slink_t *s, void *p)
 {
 	slink_node_t *node = (slink_node_t *)calloc(1, sizeof(slink_node_t));
+	node->data = p;
 	node->next = NULL;
 	if (!s->tail) {
 		s->tail = node;
