@@ -6,6 +6,9 @@
 #include "logmsg.h"
 #include "rc4.h"
 
+#define ENV_KEY_NAME	"TCPREDIRECT_KEY"
+
+
 conf_t *service_conf_init()
 {
 	conf_t *cf = (conf_t *)calloc(1, sizeof(conf_t));
@@ -38,6 +41,25 @@ static int parse_conf_fields(char *src, char *fields[], int max)
 	return i;
 }
 
+static int parse_field_key(conf_t *conf, const char* opt)
+{
+	char* fields[2];
+	int c;
+
+	if (!opt) return 0;
+
+	char* nopt = strdup(opt);
+	c = parse_conf_fields(nopt, fields, sizeof(fields)/sizeof(fields[0]));
+	if (c == 2) {
+		if (conf->leftkey) free(conf->leftkey);
+		if (conf->rightkey) free(conf->rightkey);
+		conf->leftkey = (*fields[0]) ? strdup(fields[0]):NULL;
+		conf->rightkey = (*fields[1]) ? strdup(fields[1]):NULL;
+	}
+	free(nopt);
+	return ((c==2) ? 1:-1);
+}
+
 int service_conf_parse(conf_t *conf, int argc, const char* argv[])
 {
 	char *opt;
@@ -49,6 +71,10 @@ int service_conf_parse(conf_t *conf, int argc, const char* argv[])
 	conf->leftbuffer = BUFFER_SIZE;
 	conf->rightbuffer = BUFFER_SIZE;
 
+	if (parse_field_key(conf, getenv(ENV_KEY_NAME)) < 0) {
+		logmsg("Environment " ENV_KEY_NAME " invalid\n");
+	}
+
 		for (i = 1; i < argc; i++) {
 		opt = (char *)argv[i];
 		if (strcmp(opt, "-k") == 0) {
@@ -56,15 +82,10 @@ int service_conf_parse(conf_t *conf, int argc, const char* argv[])
 				logmsg("Option '-k' should have a parameter\n");
 				return -1;
 			}
-			opt = strdup(argv[++i]);
-			c = parse_conf_fields(opt, fields, 5);
-			if (c != 2) {
+			if (parse_field_key(conf, argv[++i]) < 0) {
 				logmsg("Invalid format of option '-k'\n");
 				return -1;
 			}
-			conf->leftkey = (*fields[0]) ? strdup(fields[0]):NULL;
-			conf->rightkey = (*fields[1]) ? strdup(fields[1]):NULL;
-			free(opt);
 
 		} else if (strcmp(opt, "-b")==0) {
 			if (i+1 >= argc) {
@@ -117,6 +138,12 @@ int service_conf_parse(conf_t *conf, int argc, const char* argv[])
 	if (!conf->leftport || !conf->rightport || !conf->rightaddr) {
 		logmsg("Left port, right port and address should be provided\n");
 		return -1;
+	}
+	if (conf->leftkey) {
+		logmsg("Left key is set\n");
+	}
+	if (conf->rightkey) {
+		logmsg("Right key is set\n");
 	}
 	return 0;
 }
