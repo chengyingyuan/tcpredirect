@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
 #include "rc4.h"
 #include "network.h"
 #include "logmsg.h"
@@ -76,7 +77,8 @@ static void setup(int argc, const char *argv[])
 	UNUSED(argv);
 	if (signal(SIGTERM, sig_handler)==SIG_ERR || 
 		signal(SIGINT, sig_handler)==SIG_ERR ||
-		signal(SIGPIPE, SIG_IGN)) {
+		signal(SIGPIPE, SIG_IGN)==SIG_ERR) {
+		fprintf(stderr, "Error signal set:%d %s\n", errno, strerror(errno));
 		die("ERROR Set signal handler\n");
 	}
 }
