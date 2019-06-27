@@ -60,7 +60,8 @@ static void cleanup()
 	WSACleanup();
 }
 
-#elif __linux
+//#elif __linux
+#else
 #include <signal.h>
 
 static void sig_handler(int signo)

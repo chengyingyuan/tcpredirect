@@ -11,7 +11,8 @@
 typedef SOCKET sock_t;
 #define NETSOCK_INVALID INVALID_SOCKET
 
-#elif __linux
+//#elif __linux
+#else
 typedef int sock_t;
 #define NETSOCK_INVALID -1
 
@@ -25,8 +26,8 @@ typedef int sock_t;
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#else
-#error("Platform not supported")
+//#else
+//#error("Platform not supported")
 #endif
 
 int net_recv(sock_t s, void *buf, size_t len, int flags);

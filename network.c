@@ -153,7 +153,8 @@ int net_create_client(const char *host, int port, sock_t *s)
 	return 0;
 }
 
-#elif __linux
+//#elif __linux
+#else
 
 int net_accept(sock_t s, struct sockaddr *addr, sock_t *c)
 {
